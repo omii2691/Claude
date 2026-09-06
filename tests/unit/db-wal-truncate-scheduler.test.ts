@@ -17,24 +17,22 @@ function readSource(relativePath: string): string {
 }
 
 const CORE_PATH = "src/lib/db/core.ts";
+const MAINTENANCE_PATH = "src/lib/db/walMaintenance.ts";
 
 test("a periodic WAL truncate scheduler is started when the DB instance boots", () => {
   const source = readSource(CORE_PATH);
   assert.match(
     source,
-    /startWalTruncateScheduler\(db\)/,
-    "getDbInstance() must start the WAL truncate scheduler alongside the DB health-check scheduler"
+    /startWalMaintenance\(db/,
+    "getDbInstance() must start the WAL maintenance scheduler alongside the DB health-check scheduler"
   );
 });
 
 test("the WAL truncate scheduler runs wal_checkpoint(TRUNCATE), not a lighter mode", () => {
-  const source = readSource(CORE_PATH);
-  const fnStart = source.indexOf("function startWalTruncateScheduler");
-  assert.notEqual(fnStart, -1, "startWalTruncateScheduler must exist");
-  const fnBody = source.slice(fnStart, fnStart + 1200);
+  const source = readSource(MAINTENANCE_PATH);
   assert.match(
-    fnBody,
-    /checkpointDb\(db, "TRUNCATE"\)/,
+    source,
+    /wal_checkpoint\(TRUNCATE\)/,
     "the scheduled checkpoint must request TRUNCATE mode — a lighter mode would not shrink the WAL file"
   );
 });
@@ -47,13 +45,13 @@ test("the WAL truncate scheduler is cleared on close, like the health-check sche
   assert.match(fnBody, /clearDbHealthCheckScheduler\(\)/);
   assert.match(
     fnBody,
-    /clearWalTruncateScheduler\(\)/,
-    "closeDbInstance() must clear the WAL truncate timer so it does not outlive the DB handle"
+    /stopWalMaintenance\(\)/,
+    "closeDbInstance() must stop the WAL maintenance timer so it does not outlive the DB handle"
   );
 });
 
 test("the truncate interval is overridable via OMNIROUTE_WAL_TRUNCATE_INTERVAL_MS", () => {
-  const source = readSource(CORE_PATH);
+  const source = readSource(MAINTENANCE_PATH);
   assert.match(
     source,
     /OMNIROUTE_WAL_TRUNCATE_INTERVAL_MS/,
@@ -62,14 +60,10 @@ test("the truncate interval is overridable via OMNIROUTE_WAL_TRUNCATE_INTERVAL_M
 });
 
 test("the scheduler self-gates the same way the DB health-check scheduler does", () => {
-  const source = readSource(CORE_PATH);
-  const fnStart = source.indexOf("function startWalTruncateScheduler");
-  const fnBody = source.slice(fnStart, fnStart + 300);
-  assert.match(
-    fnBody,
-    /isCloud \|\| isBuildPhase \|\| isAutomatedTestProcess\(\)/,
-    "must not run during cloud/build/test contexts, same as startDbHealthCheckScheduler"
-  );
+  const source = readSource(MAINTENANCE_PATH);
+  assert.match(source, /isCloud/);
+  assert.match(source, /isNextBuildPhase\(\)/);
+  assert.match(source, /isAutomatedTestProcess\(\)/);
 });
 
 test("the new env var is documented", () => {
@@ -79,4 +73,14 @@ test("the new env var is documented", () => {
     /OMNIROUTE_WAL_TRUNCATE_INTERVAL_MS/,
     "docs/reference/ENVIRONMENT.md must document the new env var (check:env-doc-sync)"
   );
+});
+
+test("close carries the busy streak into the checkpoint log", () => {
+  const source = readSource(CORE_PATH);
+  const fnStart = source.indexOf("export function closeDbInstance");
+  assert.notEqual(fnStart, -1, "closeDbInstance must exist");
+  const fnBody = source.slice(fnStart, fnStart + 1200);
+  assert.match(fnBody, /getWalMaintenanceState\(\)\.busyStreak/);
+  assert.match(fnBody, /runCheckpointNow\(db, checkpointMode, \{/);
+  assert.match(fnBody, /logCheckpointOutcome\(outcome, checkpointMode, streakBefore\)/);
 });
